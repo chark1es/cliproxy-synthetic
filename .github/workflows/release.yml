@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Debian 12 container)
+        run: scripts/build.sh "${GITHUB_REF_NAME#v}" dist
+      - name: Verify
+        run: scripts/verify.sh dist/synthetic.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-linux-${{ matrix.arch }}
+          path: dist/synthetic.so
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          for arch in amd64 arm64; do
+            # CLIProxyAPI plugin-store layout: <id>_<version>_<os>_<arch>.zip with
+            # the library at the zip root, next to a checksums.txt.
+            (cd "artifacts/synthetic-linux-${arch}" && zip -q -X "../../release/synthetic_${version}_linux_${arch}.zip" synthetic.so)
+            cp "artifacts/synthetic-linux-${arch}/synthetic.so" "release/synthetic_linux_${arch}.so"
+          done
+          (cd release && sha256sum -- * > checksums.txt && cat checksums.txt)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
