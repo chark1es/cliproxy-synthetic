@@ -502,7 +502,7 @@ func TestQuotaMapping(t *testing.T) {
 	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Groups) != 3 {
+	if len(resp.Groups) != 2 {
 		t.Fatalf("groups = %d: %s", len(resp.Groups), result)
 	}
 	buckets := map[string]pluginapi.QuotaBucket{}
@@ -511,8 +511,16 @@ func TestQuotaMapping(t *testing.T) {
 			buckets[b.Window] = b
 		}
 	}
-	if b := buckets["subscription"]; b.RemainingFraction != 0.75 || b.ResetTime != "2026-10-26T10:27:51.450Z" {
-		t.Errorf("subscription bucket = %+v", b)
+	if _, ok := buckets["subscription"]; ok {
+		t.Error("legacy subscription bucket must be hidden when weekly credits are present")
+	}
+	if resp.Groups[0].DisplayName != "Weekly credits" {
+		t.Errorf("primary quota group = %q", resp.Groups[0].DisplayName)
+	}
+	for _, metric := range resp.Summary {
+		if strings.HasPrefix(metric.Key, "requests_") || strings.HasPrefix(metric.Key, "subscription_") {
+			t.Errorf("legacy subscription metric must be hidden: %+v", metric)
+		}
 	}
 	if b := buckets["hourly"]; b.RemainingFraction != 0.8 {
 		t.Errorf("hourly bucket = %+v", b)
@@ -531,10 +539,87 @@ func TestQuotaMapping(t *testing.T) {
 	}
 }
 
+func TestWeeklyCreditRecharge(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, description string
+		remaining               float64
+	}{
+		{"weekly only", `{"planWeeklyLimit":{"percentRemaining":42.5,"nextRegenAt":"2026-11-02T10:00:00Z"}}`, "recharges 2% every 202 minutes", 0.425},
+		{"empty balance", `{"planWeeklyLimit":{"percentRemaining":0}}`, "recharges 2% every 202 minutes", 0},
+		{"full balance", `{"planWeeklyLimit":{"percentRemaining":100}}`, "100% weekly credits remaining", 1},
+		{"above full", `{"planWeeklyLimit":{"percentRemaining":120}}`, "recharges 2% every 202 minutes", 1},
+		{"negative balance", `{"planWeeklyLimit":{"percentRemaining":-5}}`, "recharges 2% every 202 minutes", 0},
+		{"API tick", `{"planWeeklyLimit":{"percentRemaining":10,"nextRegenPercent":1.5}}`, "recharges 1.5% every 202 minutes", 0.1},
+		{"explicit zero tick", `{"planWeeklyLimit":{"percentRemaining":100,"nextRegenPercent":0}}`, "recharges 0% every 202 minutes", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var q synthQuotas
+			if err := json.Unmarshal([]byte(tt.body), &q); err != nil {
+				t.Fatal(err)
+			}
+			r := quotaResponse(q)
+			if len(r.Groups) != 1 || len(r.Summary) != 1 {
+				t.Fatalf("weekly-only response = %+v", r)
+			}
+			b := r.Groups[0].Buckets[0]
+			if b.RemainingFraction != tt.remaining || !strings.Contains(b.Description, tt.description) {
+				t.Errorf("weekly bucket = %+v", b)
+			}
+			if b.ResetTime != q.PlanWeeklyLimit.NextRegenAt {
+				t.Errorf("next recharge time changed: %q", b.ResetTime)
+			}
+		})
+	}
+}
+
+func TestSubscriptionOnlyQuotaFallback(t *testing.T) {
+	var q synthQuotas
+	if err := json.Unmarshal([]byte(`{"subscription":{"limit":135,"requests":0.25,"renewsAt":"2026-11-02T10:00:00Z"}}`), &q); err != nil {
+		t.Fatal(err)
+	}
+	r := quotaResponse(q)
+	if len(r.Groups) != 1 || r.Groups[0].DisplayName != "Subscription usage" {
+		t.Fatalf("subscription-only response = %+v", r)
+	}
+	b := r.Groups[0].Buckets[0]
+	if b.RemainingFraction != (135-0.25)/135 || b.Description != "0.25 of 135 usage units consumed" || b.ResetTime != q.Subscription.RenewsAt {
+		t.Errorf("subscription fallback = %+v", b)
+	}
+	if r := quotaResponse(synthQuotas{}); len(r.Groups) != 0 {
+		t.Errorf("missing quotas must not fabricate a balance: %+v", r)
+	}
+}
+
 const modelList = `{"data":[
  {"id":"syn:small:text","display_name":"GLM 4.7 Flash","created":1792195200,"context_length":196608,"max_output_length":65536,"input_modalities":["text"],"output_modalities":["text"],"supported_features":["tools","reasoning"],"supported_sampling_parameters":["temperature","top_p"]},
  {"id":"hf:zai-org/GLM-5.3","context_length":524288,"max_output_length":65536,"input_modalities":["text","image"],"output_modalities":["text"]},
  {"display_name":"no id"}]}`
+
+func TestInfiniteAliasDiscoveryAndForwarding(t *testing.T) {
+	models, err := parseModels([]byte(`{"data":[{"id":"infinite:small:vision","context_length":524288}]}`))
+	if err != nil || len(models) != 1 {
+		t.Fatalf("discover infinite alias: %v, %v", models, err)
+	}
+	var req executorRequest
+	if err := json.Unmarshal(executeRequest("openai", true), &req); err != nil {
+		t.Fatal(err)
+	}
+	req.Model = models[0].ID
+	call, err := upstreamRequest(req, true, chatPath(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(call.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "infinite:small:vision" || !body.Stream || call.URL != cfg().openAIURL("/chat/completions") {
+		t.Errorf("infinite request = %+v, URL %q", body, call.URL)
+	}
+}
 
 func TestModelsForAuthAndCache(t *testing.T) {
 	f := useHost(t, func(method string, payload json.RawMessage) (any, error) {

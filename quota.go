@@ -10,7 +10,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-// quotaWindow is one counted allowance, e.g. subscription requests per period.
+// quotaWindow is an allowance reported by the API. Subscription values are
+// usage units; search values are request counts.
 type quotaWindow struct {
 	Limit    float64 `json:"limit"`
 	Requests float64 `json:"requests"`
@@ -25,9 +26,9 @@ type synthQuotas struct {
 		Hourly *quotaWindow `json:"hourly"`
 	} `json:"search"`
 	PlanWeeklyLimit *struct {
-		NextRegenAt      string  `json:"nextRegenAt"`
-		PercentRemaining float64 `json:"percentRemaining"`
-		NextRegenPercent float64 `json:"nextRegenPercent"`
+		NextRegenAt      string   `json:"nextRegenAt"`
+		PercentRemaining float64  `json:"percentRemaining"`
+		NextRegenPercent *float64 `json:"nextRegenPercent,omitempty"`
 	} `json:"planWeeklyLimit"`
 }
 
@@ -58,16 +59,42 @@ func windowBucket(label string, w *quotaWindow) *pluginapi.QuotaBucket {
 func quotaResponse(q synthQuotas) pluginapi.QuotaFetchResponse {
 	resp := pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: "Synthetic"}}
 
-	var requestBuckets []pluginapi.QuotaBucket
-	if b := windowBucket("subscription", q.Subscription); b != nil {
-		requestBuckets = append(requestBuckets, *b)
+	if w := q.PlanWeeklyLimit; w != nil {
+		// A recharge is incremental, not a reset to a full weekly balance.
+		// Prefer the API's tick amount; older responses may omit it.
+		recharge := 2.0
+		if w.NextRegenPercent != nil {
+			recharge = *w.NextRegenPercent
+		}
+		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
+			DisplayName: "Weekly credits",
+			Buckets: []pluginapi.QuotaBucket{{
+				Window:            "weekly",
+				RemainingFraction: clamp01(w.PercentRemaining / 100),
+				ResetTime:         w.NextRegenAt,
+				Description:       fmt.Sprintf("%g%% weekly credits remaining; recharges %g%% every 202 minutes (next recharge at the indicated time)", w.PercentRemaining, recharge),
+			}},
+		})
 		resp.Summary = append(resp.Summary,
-			pluginapi.QuotaMetric{Key: "requests_used", Label: "Requests used", Value: q.Subscription.Requests, Unit: "requests", Format: "number"},
-			pluginapi.QuotaMetric{Key: "requests_limit", Label: "Request limit", Value: q.Subscription.Limit, Unit: "requests", Format: "number"},
+			pluginapi.QuotaMetric{Key: "weekly_remaining", Label: "Weekly credits remaining", Value: w.PercentRemaining, Unit: "%", Format: "number"},
 		)
-	}
-	if len(requestBuckets) > 0 {
-		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{DisplayName: "Requests", Buckets: requestBuckets})
+	} else if w := q.Subscription; w != nil && w.Limit > 0 {
+		// The published API example still uses subscription-only responses.
+		// Keep that format readable without interpreting usage as a token or
+		// request count, or exposing a second limit alongside weekly credits.
+		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
+			DisplayName: "Subscription usage",
+			Buckets: []pluginapi.QuotaBucket{{
+				Window:            "subscription",
+				RemainingFraction: clamp01((w.Limit - w.Requests) / w.Limit),
+				ResetTime:         w.RenewsAt,
+				Description:       fmt.Sprintf("%g of %g usage units consumed", w.Requests, w.Limit),
+			}},
+		})
+		resp.Summary = append(resp.Summary,
+			pluginapi.QuotaMetric{Key: "subscription_used", Label: "Subscription usage", Value: w.Requests, Unit: "usage", Format: "number"},
+			pluginapi.QuotaMetric{Key: "subscription_limit", Label: "Subscription allowance", Value: w.Limit, Unit: "usage", Format: "number"},
+		)
 	}
 
 	if q.Search != nil {
@@ -79,20 +106,6 @@ func quotaResponse(q synthQuotas) pluginapi.QuotaFetchResponse {
 		}
 	}
 
-	if w := q.PlanWeeklyLimit; w != nil {
-		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
-			DisplayName: "Weekly plan limit",
-			Buckets: []pluginapi.QuotaBucket{{
-				Window:            "weekly",
-				RemainingFraction: clamp01(w.PercentRemaining / 100),
-				ResetTime:         w.NextRegenAt,
-				Description:       fmt.Sprintf("%.0f%% remaining, regenerates %.0f%% at the reset time", w.PercentRemaining, w.NextRegenPercent),
-			}},
-		})
-		resp.Summary = append(resp.Summary,
-			pluginapi.QuotaMetric{Key: "weekly_remaining", Label: "Weekly limit remaining", Value: w.PercentRemaining, Unit: "%", Format: "number"},
-		)
-	}
 	return resp
 }
 

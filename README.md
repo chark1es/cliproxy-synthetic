@@ -5,7 +5,7 @@ A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that makes 
 | | OpenAI-compatible entry | this plugin |
 | --- | --- | --- |
 | Shows up as an account in the management panel | no | yes |
-| Per-account quota in the panel (requests, search, weekly plan limit) | no | yes |
+| Per-account quota in the panel (weekly credits and search) | no | yes |
 | Model list discovered from Synthetic | hand-written | automatic, per account |
 | Anthropic Messages API (`/v1/messages`, streaming, `count_tokens`) | translated | native Synthetic endpoint |
 | Synthetic web search | no | management route |
@@ -93,13 +93,16 @@ All routes are under `/v0/management` and need the management key. None of them 
 
 ## Quota reporting
 
-Synthetic's `/v2/quotas` is mapped to the panel's quota format as three buckets:
+Synthetic's [`/v2/quotas`](https://dev.synthetic.new/docs/synthetic/quotas) is mapped to the panel's quota format:
 
-- **Requests**: subscription requests used of the limit, resetting at `renewsAt`.
-- **Search**: hourly search requests used of the limit.
-- **Weekly plan limit**: percent remaining and the next regeneration time.
+- **Weekly credits**: percent remaining, with a 2% recharge every 202 minutes (3h22m), as documented in [Synthetic’s rate limits](https://synthetic.new/rate-limits). The displayed time is the next incremental recharge, not a full reset. When supplied, the API's `nextRegenPercent` is used for the recharge amount.
+- **Search**: hourly search usage, only when returned by the API.
 
-Quota lookups do not count against your subscription.
+When weekly data is present, the old subscription request bucket is hidden. Subscription-only responses (as still shown in the API docs) display a generic usage allowance without assuming a request count or a five-hour window. Quota lookups do not count against your subscription.
+
+The new plans are Go ($9/month), Standard ($30/month), and Big ($90/month). Weekly credits are consumed at model-specific rates; the plugin uses the API's remaining percentage rather than estimating tokens, plan size, or migration bonuses. There are no packs, five-hour limits, or fixed concurrency caps in the new plans. Priority and service throttling are handled by Synthetic.
+
+Fast Mode is enabled on Synthetic's usage page for Big subscribers. Infinite Mode uses the `infinite:small:vision` model alias and requires streaming; use it if returned by your account's model list. Model discovery and request forwarding preserve these aliases. See [Synthetic's model documentation](https://dev.synthetic.new/docs/api/models).
 
 ## Configuration
 

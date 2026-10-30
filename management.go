@@ -33,7 +33,7 @@ func handleManagementRegister() ([]byte, error) {
 	return okEnvelope(managementRegistration{Routes: []pluginapi.ManagementRoute{
 		route(http.MethodGet, "/accounts", "List Synthetic accounts (keys are masked)."),
 		route(http.MethodPost, "/accounts", "Add a Synthetic account from an API key after validating it."),
-		route(http.MethodGet, "/quotas", "Show subscription, search and weekly plan usage for each account."),
+		route(http.MethodGet, "/quotas", "Show weekly credits and available search usage for each account."),
 		route(http.MethodPost, "/search", "Run a Synthetic web search with an account's key."),
 	}})
 }
