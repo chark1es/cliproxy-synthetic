@@ -525,7 +525,9 @@ func TestQuotaMapping(t *testing.T) {
 	if b := buckets["hourly"]; b.RemainingFraction != 0.8 {
 		t.Errorf("hourly bucket = %+v", b)
 	}
-	if b := buckets["weekly"]; b.RemainingFraction != 0.8 || b.ResetTime != "2026-10-26T08:08:05.000Z" {
+	if b := buckets["weekly"]; b.RemainingFraction != 0.8 || b.ResetTime != "2026-10-27T14:26:05Z" ||
+		!strings.Contains(b.Description, "next recharge 2% at 2026-10-26T08:08:05.000Z") ||
+		!strings.Contains(b.Description, "assuming no further usage") {
 		t.Errorf("weekly bucket = %+v", b)
 	}
 
@@ -546,11 +548,11 @@ func TestWeeklyCreditRecharge(t *testing.T) {
 	}{
 		{"weekly only", `{"planWeeklyLimit":{"percentRemaining":42.5,"nextRegenAt":"2026-11-02T10:00:00Z"}}`, "recharges 2% every 202 minutes", 0.425},
 		{"empty balance", `{"planWeeklyLimit":{"percentRemaining":0}}`, "recharges 2% every 202 minutes", 0},
-		{"full balance", `{"planWeeklyLimit":{"percentRemaining":100}}`, "100% weekly credits remaining", 1},
+		{"full balance", `{"planWeeklyLimit":{"percentRemaining":100,"nextRegenAt":"2026-11-02T10:00:00Z"}}`, "100% weekly credits remaining", 1},
 		{"above full", `{"planWeeklyLimit":{"percentRemaining":120}}`, "recharges 2% every 202 minutes", 1},
 		{"negative balance", `{"planWeeklyLimit":{"percentRemaining":-5}}`, "recharges 2% every 202 minutes", 0},
-		{"API tick", `{"planWeeklyLimit":{"percentRemaining":10,"nextRegenPercent":1.5}}`, "recharges 1.5% every 202 minutes", 0.1},
-		{"explicit zero tick", `{"planWeeklyLimit":{"percentRemaining":100,"nextRegenPercent":0}}`, "recharges 0% every 202 minutes", 1},
+		{"API tick", `{"planWeeklyLimit":{"percentRemaining":10,"nextRegenPercent":1.5}}`, "recharges 2% every 202 minutes", 0.1},
+		{"explicit zero tick", `{"planWeeklyLimit":{"percentRemaining":100,"nextRegenPercent":0}}`, "fully regenerated", 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var q synthQuotas
@@ -565,8 +567,44 @@ func TestWeeklyCreditRecharge(t *testing.T) {
 			if b.RemainingFraction != tt.remaining || !strings.Contains(b.Description, tt.description) {
 				t.Errorf("weekly bucket = %+v", b)
 			}
-			if b.ResetTime != q.PlanWeeklyLimit.NextRegenAt {
-				t.Errorf("next recharge time changed: %q", b.ResetTime)
+			if tt.name == "weekly only" && b.ResetTime != "2026-11-06T08:16:00Z" {
+				t.Errorf("full regeneration time = %q", b.ResetTime)
+			}
+			if tt.remaining == 1 && b.ResetTime != "" {
+				t.Errorf("full balance must not show a future regeneration time: %q", b.ResetTime)
+			}
+			if q.PlanWeeklyLimit.NextRegenAt == "" && b.ResetTime != "" {
+				t.Errorf("missing recharge schedule produced an estimate: %q", b.ResetTime)
+			}
+		})
+	}
+}
+
+func TestWeeklyFullRegenerationTime(t *testing.T) {
+	const next = "2026-11-02T10:00:00Z"
+	for _, tt := range []struct {
+		name                string
+		remaining, recharge float64
+		next, want          string
+	}{
+		{"empty", 0, 2, next, "2026-11-09T06:58:00Z"},
+		{"80 percent", 80, 2, next, "2026-11-03T16:18:00Z"},
+		{"fractional balance", 95.5, 2, next, "2026-11-02T16:44:00Z"},
+		{"one tick", 98, 2, next, next},
+		{"partial final tick", 99.5, 0.5, next, next},
+		{"partial next tick", 95, 1, next, "2026-11-02T16:44:00Z"},
+		{"full", 100, 2, next, ""},
+		{"over full", 120, 2, next, ""},
+		{"negative balance", -5, 2, next, "2026-11-09T06:58:00Z"},
+		{"no scheduled recharge", 50, 0, next, ""},
+		{"negative recharge", 50, -2, next, ""},
+		{"missing timestamp", 50, 2, "", ""},
+		{"invalid timestamp", 50, 2, "invalid", ""},
+		{"timezone and precision", 96, 2, "2026-11-02T10:00:00.123-08:00", "2026-11-02T21:22:00.123Z"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := weeklyFullRegenAt(tt.remaining, tt.next, tt.recharge); got != tt.want {
+				t.Errorf("full regeneration = %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -95,7 +95,7 @@ All routes are under `/v0/management` and need the management key. None of them 
 
 Synthetic's [`/v2/quotas`](https://dev.synthetic.new/docs/synthetic/quotas) is mapped to the panel's quota format:
 
-- **Weekly credits**: percent remaining, with a 2% recharge every 202 minutes (3h22m), as documented in [Synthetic’s rate limits](https://synthetic.new/rate-limits). The displayed time is the next incremental recharge, not a full reset. When supplied, the API's `nextRegenPercent` is used for the recharge amount.
+- **Weekly credits**: percent remaining, with a 2% recharge every 202 minutes (3h22m), as documented in [Synthetic’s rate limits](https://synthetic.new/rate-limits). The displayed time estimates when credits will reach 100%, assuming no further usage. It starts at the API's `nextRegenAt`, accounts for `nextRegenPercent` when supplied, and adds 202-minute ticks restoring 2% each until full. The next incremental recharge remains in the description. Full balances and responses without a valid recharge schedule omit the estimate.
 - **Search**: hourly search usage, only when returned by the API.
 
 When weekly data is present, the old subscription request bucket is hidden. Subscription-only responses (as still shown in the API docs) display a generic usage allowance without assuming a request count or a five-hour window. Quota lookups do not count against your subscription.

@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -54,6 +56,23 @@ func windowBucket(label string, w *quotaWindow) *pluginapi.QuotaBucket {
 	}
 }
 
+const weeklyRechargeInterval = 202 * time.Minute
+
+// weeklyFullRegenAt anchors the estimate at the API's next tick. That tick can
+// be partial; subsequent ticks restore the documented 2% of weekly credits.
+func weeklyFullRegenAt(percentRemaining float64, nextRegenAt string, nextRecharge float64) string {
+	remaining := math.Max(0, math.Min(100, percentRemaining))
+	if remaining >= 100 || nextRecharge <= 0 {
+		return ""
+	}
+	next, err := time.Parse(time.RFC3339Nano, nextRegenAt)
+	if err != nil {
+		return ""
+	}
+	ticksAfterNext := math.Ceil(math.Max(0, 100-remaining-nextRecharge) / 2)
+	return next.Add(time.Duration(ticksAfterNext) * weeklyRechargeInterval).UTC().Format(time.RFC3339Nano)
+}
+
 // quotaResponse converts Synthetic's quota document into the normalized shape
 // the management UI renders.
 func quotaResponse(q synthQuotas) pluginapi.QuotaFetchResponse {
@@ -66,13 +85,25 @@ func quotaResponse(q synthQuotas) pluginapi.QuotaFetchResponse {
 		if w.NextRegenPercent != nil {
 			recharge = *w.NextRegenPercent
 		}
+		fullRegenAt := weeklyFullRegenAt(w.PercentRemaining, w.NextRegenAt, recharge)
+		description := fmt.Sprintf("%g%% weekly credits remaining; recharges 2%% every 202 minutes", w.PercentRemaining)
+		if w.PercentRemaining >= 100 {
+			description += "; fully regenerated"
+		} else {
+			if _, err := time.Parse(time.RFC3339Nano, w.NextRegenAt); err == nil {
+				description += fmt.Sprintf("; next recharge %g%% at %s", recharge, w.NextRegenAt)
+			}
+			if fullRegenAt != "" {
+				description += "; fully regenerated at the indicated time, assuming no further usage"
+			}
+		}
 		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
 			DisplayName: "Weekly credits",
 			Buckets: []pluginapi.QuotaBucket{{
 				Window:            "weekly",
 				RemainingFraction: clamp01(w.PercentRemaining / 100),
-				ResetTime:         w.NextRegenAt,
-				Description:       fmt.Sprintf("%g%% weekly credits remaining; recharges %g%% every 202 minutes (next recharge at the indicated time)", w.PercentRemaining, recharge),
+				ResetTime:         fullRegenAt,
+				Description:       description,
 			}},
 		})
 		resp.Summary = append(resp.Summary,
