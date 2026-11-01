@@ -693,6 +693,38 @@ func TestModelsForAuthAndCache(t *testing.T) {
 	}
 }
 
+func TestModelReasoningAndContextMapping(t *testing.T) {
+	// Shaped like Synthetic's live /models response: efforts differ per model,
+	// and a model with no reasoning_parameters must get no reasoning controls.
+	models, err := parseModels([]byte(`{"data":[
+ {"id":"syn:small:text","context_length":196608,"max_output_length":65536,"supported_features":["tools","reasoning"],"reasoning_parameters":{"efforts":["none","low","medium","high"]}},
+ {"id":"syn:large:vision","context_length":524288,"max_output_length":65536,"input_modalities":["text","image"],"reasoning_parameters":{"efforts":["low","high","max"]}},
+ {"id":"hf:plain","context_length":131072,"max_output_length":8192}]}`))
+	if err != nil || len(models) != 3 {
+		t.Fatalf("parse = %+v, %v", models, err)
+	}
+	small, large, plain := models[0], models[1], models[2]
+
+	if small.Thinking == nil || strings.Join(small.Thinking.Levels, ",") != "none,low,medium,high" {
+		t.Errorf("small levels = %+v", small.Thinking)
+	}
+	if large.Thinking == nil || strings.Join(large.Thinking.Levels, ",") != "low,high,max" {
+		t.Errorf("large levels = %+v", large.Thinking)
+	}
+	if plain.Thinking != nil {
+		t.Errorf("model without reasoning_parameters got thinking %+v", plain.Thinking)
+	}
+	if small.ContextLength != 196608 || small.InputTokenLimit != 196608 || small.MaxCompletionTokens != 65536 || small.OutputTokenLimit != 65536 {
+		t.Errorf("context/output limits not exposed: %+v", small)
+	}
+	if large.ContextLength != 524288 || plain.ContextLength != 131072 {
+		t.Errorf("context lengths = %d, %d", large.ContextLength, plain.ContextLength)
+	}
+	if !strings.Contains(strings.Join(small.SupportedParameters, ","), "reasoning_effort") {
+		t.Errorf("reasoning model lost reasoning_effort parameter: %v", small.SupportedParameters)
+	}
+}
+
 func TestModelsFallBackToStaleCache(t *testing.T) {
 	fail := false
 	useHost(t, func(method string, payload json.RawMessage) (any, error) {

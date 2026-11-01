@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,8 +27,14 @@ type synthModel struct {
 	OutputModalities  []string `json:"output_modalities"`
 	SupportedFeatures []string `json:"supported_features"`
 	SupportedSampling []string `json:"supported_sampling_parameters"`
-	HuggingFaceID     string   `json:"hugging_face_id"`
-	AlwaysOn          bool     `json:"always_on"`
+	// ReasoningParameters lists the reasoning_effort values each model accepts.
+	// The set differs per model (for example "none" and "xhigh" are not offered
+	// everywhere), so it is passed through per model rather than assumed.
+	ReasoningParameters *struct {
+		Efforts []string `json:"efforts"`
+	} `json:"reasoning_parameters"`
+	HuggingFaceID string `json:"hugging_face_id"`
+	AlwaysOn      bool   `json:"always_on"`
 }
 
 type modelsCacheEntry struct {
@@ -66,6 +73,7 @@ func toModelInfo(m synthModel) pluginapi.ModelInfo {
 		name = m.ID
 	}
 	return pluginapi.ModelInfo{
+		Thinking:                   thinkingSupport(m),
 		ID:                         m.ID,
 		Object:                     "model",
 		Created:                    m.Created,
@@ -83,6 +91,31 @@ func toModelInfo(m synthModel) pluginapi.ModelInfo {
 		SupportedOutputModalities:  m.OutputModalities,
 		UserDefined:                true,
 	}
+}
+
+// thinkingSupport turns a model's reasoning_parameters.efforts into the host's
+// reasoning controls, so the host can validate a requested effort (and a
+// "(level)" suffix) against what this model actually accepts. The host treats
+// "none" as zero-allowed and "auto" as dynamic, so the levels pass through
+// unchanged. Models that report no efforts get no controls.
+func thinkingSupport(m synthModel) *pluginapi.ThinkingSupport {
+	if m.ReasoningParameters == nil {
+		return nil
+	}
+	levels := make([]string, 0, len(m.ReasoningParameters.Efforts))
+	seen := map[string]bool{}
+	for _, effort := range m.ReasoningParameters.Efforts {
+		effort = strings.ToLower(strings.TrimSpace(effort))
+		if effort == "" || seen[effort] {
+			continue
+		}
+		seen[effort] = true
+		levels = append(levels, effort)
+	}
+	if len(levels) == 0 {
+		return nil
+	}
+	return &pluginapi.ThinkingSupport{Levels: levels}
 }
 
 func dedupeSorted(in []string) []string {
